@@ -1,0 +1,53 @@
+{
+  "exchange": "binance_testnet",
+  "tradingMode": "live",
+  "logLevel": "info",
+  "binance": {
+    "testnet": true,
+    "baseUrl": "https://testnet.binancefuture.com",
+    "wsUrl": "wss://fstream.binancefuture.com"
+  },
+  "derivatives": {
+    "marginCurrency": "USDT",
+    "leverage": 10,
+    "leverageBySymbol": {
+      "BTCUSDT": 20,
+      "ETHUSDT": 15
+    },
+    "marginType": "isolated",
+    "attachSlTpOnEntry": false,
+    "respectInstrumentMaxLeverage": true
+  },
+  "risk": {
+    "accountBalanceUsdt": 10000,
+    "riskPerTradePct": 1,
+    "maxDailyDrawdownPct": 5,
+    "maxConsecutiveLosses": 5,
+    "maxOpenTrades": 3,
+    "maxExposurePct": 40,
+    "maxNotionalToEquity": 12,
+    "minConfidenceScore": 62,
+    "minRiskReward": 1.5
+  },
+  "scanner": {
+    "universeSize": 80,
+    "minDailyVolumeUsdt": 500000,
+    "maxSpreadBps": 80,
+    "universeRefreshMs": 900000,
+    "scanCycleMs": 2000
+  },
+  "strategy": {
+    "primaryTimeframes": ["1m", "3m"],
+    "confirmationTimeframes": ["5m", "15m"],
+    "trendTimeframe": "1h",
+    "institutionalVolumeMultiple": 1.8,
+    "minBodyRatio": 0.45,
+    "maxWickRatio": 0.4,
+    "allowShort": true,
+    "signalTtlMs": 180000,
+    "relaxedEntry": true
+  },
+  "alerts": {
+    "enabled": false
+  }
+}

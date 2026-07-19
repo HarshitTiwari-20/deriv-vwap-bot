@@ -1,0 +1,42 @@
+/** @type {import('jest').Config} */
+module.exports = {
+  preset: 'ts-jest/presets/default-esm',
+  testEnvironment: 'node',
+  extensionsToTreatAsEsm: ['.ts'],
+  moduleNameMapper: {
+    '^(\\.{1,2}/.*)\\.js$': '$1',
+    '^@/(.*)$': '<rootDir>/src/$1',
+    '^@config/(.*)$': '<rootDir>/src/config/$1',
+    '^@exchange/(.*)$': '<rootDir>/src/exchange/$1',
+    '^@scanner/(.*)$': '<rootDir>/src/scanner/$1',
+    '^@strategy/(.*)$': '<rootDir>/src/strategy/$1',
+    '^@indicators/(.*)$': '<rootDir>/src/indicators/$1',
+    '^@risk/(.*)$': '<rootDir>/src/risk/$1',
+    '^@portfolio/(.*)$': '<rootDir>/src/portfolio/$1',
+    '^@alerts/(.*)$': '<rootDir>/src/alerts/$1',
+    '^@workers/(.*)$': '<rootDir>/src/workers/$1',
+    '^@websocket/(.*)$': '<rootDir>/src/websocket/$1',
+    '^@backtest/(.*)$': '<rootDir>/src/backtest/$1',
+    '^@database/(.*)$': '<rootDir>/src/database/$1',
+    '^@utils/(.*)$': '<rootDir>/src/utils/$1',
+    '^@types/(.*)$': '<rootDir>/src/types/$1',
+    '^@di/(.*)$': '<rootDir>/src/di/$1',
+    '^@events/(.*)$': '<rootDir>/src/events/$1',
+    '^@services/(.*)$': '<rootDir>/src/services/$1',
+  },
+  transform: {
+    '^.+\\.tsx?$': [
+      'ts-jest',
+      {
+        useESM: true,
+        tsconfig: 'tsconfig.json',
+      },
+    ],
+  },
+  testMatch: ['**/tests/**/*.test.ts', '**/tests/**/*.spec.ts'],
+  collectCoverageFrom: ['src/**/*.ts', '!src/**/*.d.ts', '!src/main.ts'],
+  coverageDirectory: 'coverage',
+  clearMocks: true,
+  verbose: true,
+  testTimeout: 30000,
+};

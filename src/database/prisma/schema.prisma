@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model OrderRecord {
+  id              String   @id
+  clientOrderId   String?
+  exchangeOrderId String?
+  symbol          String
+  side            String
+  type            String
+  quantity        Float
+  filledQuantity  Float    @default(0)
+  price           Float?
+  avgFillPrice    Float?
+  status          String
+  fee             Float?
+  mode            String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([symbol, status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model PositionRecord {
+  id                 String    @id
+  symbol             String
+  side               String
+  entryPrice         Float
+  quantity           Float
+  remainingQuantity  Float
+  stopLoss           Float
+  takeProfit1        Float
+  takeProfit2        Float
+  takeProfit3        Float?
+  currentStop        Float
+  riskAmount         Float
+  status             String
+  confidence         Float
+  realizedPnl        Float     @default(0)
+  signalId           String?
+  mode               String
+  openedAt           DateTime
+  closedAt           DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([symbol, status])
+  @@map("positions")
+}
+
+model TradeRecord {
+  id          String   @id
+  positionId  String
+  symbol      String
+  side        String
+  entryPrice  Float
+  exitPrice   Float
+  quantity    Float
+  pnl         Float
+  pnlPct      Float
+  rMultiple   Float
+  fees        Float
+  confidence  Float
+  exitReason  String
+  reasons     String
+  mode        String
+  openedAt    DateTime
+  closedAt    DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([symbol])
+  @@index([closedAt])
+  @@map("trades")
+}
+
+model ZoneRecord {
+  id             String   @id
+  symbol         String
+  type           String
+  high           Float
+  low            Float
+  volume         Float
+  strengthScore  Float
+  retestCount    Int      @default(0)
+  freshness      Float
+  status         String
+  breakStatus    Boolean  @default(false)
+  timeframe      String
+  timestamp      DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([symbol, status])
+  @@map("zones")
+}
+
+model ScanSnapshot {
+  id        String   @id @default(cuid())
+  ranked    Json
+  durationMs Int
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("scan_snapshots")
+}
+
+model BotLog {
+  id        String   @id @default(cuid())
+  level     String
+  message   String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([level])
+  @@map("bot_logs")
+}

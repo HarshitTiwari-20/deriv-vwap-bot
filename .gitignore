@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Prisma
+src/database/prisma/migrations/**/migration_lock.toml
+
+# Runtime data
+data/
+tmp/
+*.pid
+
+# Docker volumes (local)
+postgres-data/
+redis-data/
+
+# Secrets
+*.pem
+*.key
+secrets/
+
+# OS
+Thumbs.db
