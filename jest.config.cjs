@@ -17,7 +17,6 @@ module.exports = {
     '^@workers/(.*)$': '<rootDir>/src/workers/$1',
     '^@websocket/(.*)$': '<rootDir>/src/websocket/$1',
     '^@backtest/(.*)$': '<rootDir>/src/backtest/$1',
-    '^@database/(.*)$': '<rootDir>/src/database/$1',
     '^@utils/(.*)$': '<rootDir>/src/utils/$1',
     '^@types/(.*)$': '<rootDir>/src/types/$1',
     '^@di/(.*)$': '<rootDir>/src/di/$1',

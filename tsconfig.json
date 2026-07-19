@@ -36,7 +36,6 @@
       "@workers/*": ["src/workers/*"],
       "@websocket/*": ["src/websocket/*"],
       "@backtest/*": ["src/backtest/*"],
-      "@database/*": ["src/database/*"],
       "@utils/*": ["src/utils/*"],
       "@types/*": ["src/types/*"],
       "@di/*": ["src/di/*"],

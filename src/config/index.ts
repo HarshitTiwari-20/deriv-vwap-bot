@@ -104,11 +104,6 @@ export function loadConfig(): AppConfig {
       attachSlTpOnEntry: bool('DERIV_ATTACH_SL_TP', true),
       respectInstrumentMaxLeverage: bool('DERIV_RESPECT_MAX_LEVERAGE', true),
     },
-    database: {
-      url:
-        process.env.DATABASE_URL ??
-        'postgresql://algo:algo_secret@localhost:5432/algo_vwap?schema=public',
-    },
     redis: {
       url: process.env.REDIS_URL ?? 'redis://localhost:6379',
       password: process.env.REDIS_PASSWORD || undefined,

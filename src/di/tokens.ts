@@ -4,7 +4,6 @@ export const TOKENS = {
   EventBus: 'EventBus',
   Logger: 'Logger',
   Redis: 'Redis',
-  Prisma: 'Prisma',
   ExchangeClient: 'ExchangeClient',
   MarketDataWs: 'MarketDataWs',
   CandleStore: 'CandleStore',
@@ -21,10 +20,6 @@ export const TOKENS = {
   RiskManager: 'RiskManager',
   PortfolioManager: 'PortfolioManager',
   TradeExecutor: 'TradeExecutor',
-  OrderRepository: 'OrderRepository',
-  TradeRepository: 'TradeRepository',
-  PositionRepository: 'PositionRepository',
-  ZoneRepository: 'ZoneRepository',
   AlertService: 'AlertService',
   BotOrchestrator: 'BotOrchestrator',
 } as const;

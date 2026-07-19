@@ -56,10 +56,6 @@ export const AppConfigSchema = z.object({
     })
     .default({}),
 
-  database: z.object({
-    url: z.string().default('postgresql://algo:algo_secret@localhost:5432/algo_vwap?schema=public'),
-  }),
-
   redis: z.object({
     url: z.string().default('redis://localhost:6379'),
     password: z.string().optional(),

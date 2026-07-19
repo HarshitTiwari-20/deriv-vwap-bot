@@ -25,7 +25,7 @@ The bot continuously scans **100–200 USDT-M futures pairs**, ranks them with i
 | **Alerts** | Telegram + Discord formatted signals |
 | **Backtest** | Replay, walk-forward, Monte Carlo, Sharpe/Sortino/CAGR/PF |
 | **Dashboard** | Next.js + Tailwind + Recharts live UI |
-| **Infra** | Docker Compose (Postgres, Redis, bot, dashboard), Prisma, BullMQ, workers |
+| **Infra** | Docker Compose (Redis optional, bot, dashboard), BullMQ hooks, workers |
 
 ---
 
@@ -40,7 +40,7 @@ Exchange (CoinDCX REST/WS)  →  CandleStore / Universe
          ↓
    Ranking  →  Risk gate (margin + leverage)  →  Futures portfolio
          ↓
-   EventBus  →  Alerts · API/WS · (optional) Prisma · Redis
+   EventBus  →  Alerts · API/WS · (optional) Redis
 ```
 
 **No look-ahead:** entry decisions use only **closed** candles. Swing points require right-side confirmation bars.
@@ -67,7 +67,6 @@ src/
   alerts/           # Telegram / Discord
   backtest/         # Engine, metrics, CLI
   workers/          # worker_threads analysis pool
-  database/         # Prisma schema + repositories
   services/         # Orchestrator + HTTP/WS API
   di/               # tsyringe tokens
   events/           # Typed EventBus
@@ -257,7 +256,7 @@ Reason:
 ## Docker
 
 ```bash
-docker compose up -d postgres redis   # infra only
+docker compose up -d redis            # optional cache/queue
 docker compose up -d --build          # full stack
 ```
 
@@ -268,13 +267,7 @@ Services:
 | Bot API | 3100 |
 | Bot WS | 3101 |
 | Dashboard | 3000 |
-| Postgres | 5432 |
 | Redis | 6379 |
-
-```bash
-pnpm db:generate
-pnpm db:push
-```
 
 ---
 

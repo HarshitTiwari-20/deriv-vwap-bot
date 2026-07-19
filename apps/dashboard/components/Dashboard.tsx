@@ -87,7 +87,7 @@ export default function Dashboard() {
 
   const equityCurve = useMemo(() => {
     const trades = status?.recentTrades ?? [];
-    let eq = status?.risk.accountBalance ?? 10000;
+    const eq = status?.risk.accountBalance ?? 10000;
     // rebuild roughly from reverse
     const sorted = [...trades].sort((a, b) => a.closedAt - b.closedAt);
     const start = eq - sorted.reduce((s, t) => s + t.pnl, 0);
