@@ -511,6 +511,35 @@ export class BinanceFuturesClient implements IExchangeClient {
     });
   }
 
+  async cancelAllOpenOrders(): Promise<void> {
+    const open = await this.getOpenOrders();
+    const bySymbol = new Set(open.map((o) => o.symbol).filter(Boolean));
+    for (const symbol of bySymbol) {
+      try {
+        await this.signedRequest('DELETE', '/fapi/v1/allOpenOrders', {
+          symbol: this.toPair(symbol),
+        });
+      } catch (err) {
+        log.warn({ err, symbol }, 'cancelAllOpenOrders failed for symbol');
+      }
+    }
+  }
+
+  /**
+   * Binance testnet/mainnet has no spot↔futures transfer in this adapter.
+   * Redeem is a no-op with a clear error so the UI can explain.
+   */
+  async transferFuturesWallet(
+    transferType: 'deposit' | 'withdraw',
+    amount: number,
+    currency = 'USDT',
+  ): Promise<import('./types.js').WalletTransferResult> {
+    throw new Error(
+      `Wallet transfer (${transferType} ${amount} ${currency}) is only supported on CoinDCX. ` +
+        'On Binance, move funds via the exchange UI or transfer API separately.',
+    );
+  }
+
   /**
    * Best-effort conditional exits. Prefer algo endpoint; fall back silently.
    * Bot always manages stops in-process regardless.

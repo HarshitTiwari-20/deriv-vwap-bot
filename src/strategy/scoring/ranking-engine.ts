@@ -28,7 +28,8 @@ const W = {
 };
 
 /**
- * Ranks 100–200 coins every scan cycle. Top candidates feed the executor.
+ * Ranks 100–200 coins every scan cycle.
+ * Pass topN=0 or Infinity to return the full ranked universe.
  */
 export class RankingEngine {
   rank(inputs: RankInput[], topN = 10): CoinRankResult[] {
@@ -70,6 +71,8 @@ export class RankingEngine {
     });
 
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, topN).map((r, i) => ({ ...r, rank: i + 1 }));
+    const all = scored.map((r, i) => ({ ...r, rank: i + 1 }));
+    if (!topN || topN <= 0 || topN >= all.length) return all;
+    return all.slice(0, topN);
   }
 }

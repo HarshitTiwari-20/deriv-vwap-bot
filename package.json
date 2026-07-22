@@ -30,7 +30,7 @@
     "docker:down": "docker compose down",
     "docker:build": "docker compose build",
     "prepare": "husky || true",
-    "go": "pnpm dev && pnpm dashboard"
+    "go": "pnpm dashboard & pnpm dev"
   },
   "dependencies": {
     "bullmq": "^5.41.0",

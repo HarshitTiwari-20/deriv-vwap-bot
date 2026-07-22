@@ -53,6 +53,20 @@ export const AppConfigSchema = z.object({
       attachSlTpOnEntry: z.boolean().default(true),
       /** Max leverage clamp if instrument max is lower */
       respectInstrumentMaxLeverage: z.boolean().default(true),
+      /**
+       * Micro / low-fund capital-preservation mode:
+       * - only pairs that fit wallet min margin
+       * - size toward exchange min lot with hard risk cap
+       * - tight daily loss limits
+       */
+      microAccountMode: z.boolean().default(false),
+      /** Optional USDT→INR override; 0 = fetch live USDTINR ticker */
+      usdtInrRate: z.number().nonnegative().default(0),
+      /**
+       * Preferred symbols for micro mode (high lev + low min notional).
+       * Empty = auto-filter by affordable margin.
+       */
+      preferredSymbols: z.array(z.string()).default([]),
     })
     .default({}),
 
@@ -76,6 +90,18 @@ export const AppConfigSchema = z.object({
     maxNotionalToEquity: z.number().positive().default(10),
     minConfidenceScore: z.number().min(0).max(100).default(85),
     minRiskReward: z.number().positive().default(2),
+    /**
+     * Hard cap on risk per trade as % of equity (micro: reject min-lot if risk too big).
+     * Defaults equal to riskPerTradePct when 0.
+     */
+    maxRiskPerTradePct: z.number().nonnegative().max(10).default(0),
+    /** Stop trading after this many trades per UTC day (0 = unlimited) */
+    maxTradesPerDay: z.number().int().nonnegative().default(0),
+    /**
+     * When true, open-trades / exposure / stops scale automatically from live wallet balance.
+     * Adding funds unlocks more concurrent trades without editing .env.
+     */
+    autoAdaptToBalance: z.boolean().default(true),
   }),
 
   scanner: z
@@ -111,6 +137,13 @@ export const AppConfigSchema = z.object({
        * Production CoinDCX should keep this false.
        */
       relaxedEntry: z.boolean().default(false),
+      /**
+       * Short-TF indicator path: RSI + MACD + Supertrend + Volume + EMA.
+       * When true, entries can fire without full institutional zone stack.
+       */
+      indicatorEntry: z.boolean().default(true),
+      /** Min indicator agreement score 0–1 for indicator path */
+      indicatorMinScore: z.number().min(0).max(1).default(0.55),
     })
     .default({}),
 

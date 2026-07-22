@@ -39,6 +39,8 @@ export class BotOrchestrator {
   private zones!: InstitutionalZoneDetector;
   private startedAt = 0;
   private candleRefreshTimer?: ReturnType<typeof setInterval>;
+  private positionSyncTimer?: ReturnType<typeof setInterval>;
+  private positionManageTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly config: AppConfig,
@@ -67,7 +69,13 @@ export class BotOrchestrator {
       this.eventBus,
       this.config,
     );
-    await this.portfolio.refreshBalance();
+    const bal = await this.portfolio.refreshBalance();
+    if (bal) {
+      this.risk.setSessionStartBalance(bal.total);
+    }
+    // Import any positions already open on CoinDCX (restart / manual / missed fill)
+    await this.portfolio.syncExchangePositions();
+    this.startPositionSync();
 
     this.zones = new InstitutionalZoneDetector({
       volumeMultiple: this.config.strategy.institutionalVolumeMultiple,
@@ -98,6 +106,7 @@ export class BotOrchestrator {
       volume,
       scoring,
       this.config,
+      () => this.risk.getProfile(),
     );
 
     this.universe = new UniverseManager(this.exchange, this.eventBus, this.config);
@@ -154,18 +163,26 @@ export class BotOrchestrator {
     this.marketWs.subscribe(symbols);
     await this.marketWs.start();
 
-    // Warm a lighter history for fast startup (enough for indicators)
-    log.info({ symbols: symbols.length }, 'Warming futures candle history…');
-    const warm = await this.marketWs.warmCandles(symbols, 120);
-    for (const [sym, byTf] of warm) {
+    // Fast path: warm primary TF for all pairs so scanner can start in ~30–60s
+    const primary = (this.config.strategy.primaryTimeframes[0] ?? '1m') as Timeframe;
+    const confirmTfs = [
+      ...this.config.strategy.confirmationTimeframes,
+      this.config.strategy.trendTimeframe,
+      ...this.config.strategy.primaryTimeframes.slice(1),
+    ] as Timeframe[];
+
+    log.info(
+      { symbols: symbols.length, tf: primary },
+      'Warming primary TF for full universe scan…',
+    );
+    const warmPrimary = await this.marketWs.warmCandles(symbols, 80, [primary]);
+    for (const [sym, byTf] of warmPrimary) {
       for (const [tf, cs] of byTf) {
         this.candles.set(sym, tf, cs);
       }
     }
 
-    // Keep 1m candles fresh from REST so volume/RVOL stay valid (WS tickers have no volume)
     this.startCandleRefresh(symbols);
-
     this.scanner.start();
     this.eventBus.emit('system:ready', {
       mode: this.config.exchange,
@@ -174,11 +191,51 @@ export class BotOrchestrator {
     log.info(
       {
         exchange: this.config.exchange,
-        relaxedEntry: this.config.strategy.relaxedEntry,
+        universe: symbols.length,
         minConfidence: this.config.risk.minConfidenceScore,
       },
-      'Derivatives bot is live',
+      'Bot live — scanning universe (best-of-best execution). Background TF warm continues…',
     );
+
+    // Background: warm remaining TFs without blocking API / first scans
+    void (async () => {
+      try {
+        const extra = [...new Set(confirmTfs)];
+        log.info({ symbols: symbols.length, tfs: extra }, 'Background multi-TF warm start');
+        const warmRest = await this.marketWs.warmCandles(symbols, 80, extra);
+        for (const [sym, byTf] of warmRest) {
+          for (const [tf, cs] of byTf) {
+            this.candles.set(sym, tf, cs);
+          }
+        }
+        log.info({ symbols: symbols.length }, 'Background multi-TF warm complete');
+      } catch (err) {
+        log.warn({ err }, 'Background candle warm failed');
+      }
+    })();
+  }
+
+  /** Keep dashboard in sync with exchange open positions every 20s */
+  private startPositionSync(): void {
+    if (this.positionSyncTimer) clearInterval(this.positionSyncTimer);
+    this.positionSyncTimer = setInterval(() => {
+      void this.portfolio?.syncExchangePositions().catch((err) =>
+        log.debug({ err }, 'position sync tick failed'),
+      );
+    }, 20_000);
+
+    // Active SL/TP manager — every 3s using exchange mark prices
+    if (this.positionManageTimer) clearInterval(this.positionManageTimer);
+    this.positionManageTimer = setInterval(() => {
+      void this.portfolio?.manageOpenPositions().catch((err) =>
+        log.debug({ err }, 'position manage tick failed'),
+      );
+      // Ensure open symbols stay in market subscription set
+      const openSyms = this.portfolio?.getOpenPositions().map((p) => p.symbol) ?? [];
+      if (openSyms.length && this.marketWs) {
+        this.marketWs.subscribe(openSyms);
+      }
+    }, 3_000);
   }
 
   /**
@@ -216,37 +273,102 @@ export class BotOrchestrator {
   private async handleRanked(
     ranked: import('../types/strategy.js').CoinRankResult[],
   ): Promise<void> {
+    // Best-of-best: prefer indicator path + tight stops (affordable min-lot risk on micro)
     const candidates = ranked
       .filter((r) => r.signal?.confidence.passed)
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => {
+        const sa = a.signal!;
+        const sb = b.signal!;
+        const indA = sa.reasons?.some((x) => x.includes('path:indicators')) ? 1 : 0;
+        const indB = sb.reasons?.some((x) => x.includes('path:indicators')) ? 1 : 0;
+        if (indB !== indA) return indB - indA;
+        const stopA = Math.abs(sa.entry - sa.stopLoss) / Math.max(sa.entry, 1e-12);
+        const stopB = Math.abs(sb.entry - sb.stopLoss) / Math.max(sb.entry, 1e-12);
+        // Tighter stop first → lower min-lot INR risk
+        if (Math.abs(stopA - stopB) > 0.0005) return stopA - stopB;
+        const confDelta = (sb.confidence.total ?? 0) - (sa.confidence.total ?? 0);
+        if (Math.abs(confDelta) > 1) return confDelta;
+        return b.score - a.score;
+      });
 
     if (candidates.length === 0) return;
-    const top = candidates[0]!;
-    if (!top.signal) return;
-    await this.portfolio.tryOpenFromSignal(top.signal);
+
+    // Try up to top 12 so we skip pairs whose min margin / risk > wallet
+    for (const c of candidates.slice(0, 12)) {
+      if (!c.signal) continue;
+      const stopPct =
+        (Math.abs(c.signal.entry - c.signal.stopLoss) / Math.max(c.signal.entry, 1e-12)) * 100;
+      log.info(
+        {
+          pick: c.symbol,
+          rank: c.rank,
+          score: c.score,
+          conf: c.signal.confidence.total,
+          side: c.signal.side,
+          stopPct: Number(stopPct.toFixed(3)),
+          pool: candidates.length,
+          scanned: ranked.length,
+          path: c.signal.reasons?.find((x) => x.startsWith('path:')) ?? '?',
+        },
+        'Best-of-best trade candidate',
+      );
+      const pos = await this.portfolio.tryOpenFromSignal(c.signal);
+      if (pos) return;
+    }
   }
 
   getStatus(): BotStatusSnapshot {
-    const risk = this.risk.getState();
+    const risk = this.risk?.getState() ?? {
+      accountBalance: this.config.risk.accountBalanceUsdt,
+      equity: this.config.risk.accountBalanceUsdt,
+      openRisk: 0,
+      openExposure: 0,
+      openNotional: 0,
+      dailyPnl: 0,
+      dailyPnlPct: 0,
+      consecutiveLosses: 0,
+      consecutiveWins: 0,
+      tradingHalted: false,
+      killSwitchActive: false,
+      openTradeCount: 0,
+      winRate: 0,
+      totalTrades: 0,
+      maxDrawdownPct: 0,
+      defaultLeverage: this.config.derivatives.leverage,
+      marginCurrency: this.config.derivatives.marginCurrency,
+      sessionStartBalance: this.config.risk.accountBalanceUsdt,
+    };
+    const ready = Boolean(this.scanner && this.portfolio && this.risk);
     return {
-      mode: `${this.config.exchange} x${this.config.derivatives.leverage}`,
-      uptime: Date.now() - this.startedAt,
+      mode: ready
+        ? `${this.config.exchange} ${this.config.derivatives.marginCurrency}-M x${this.config.derivatives.leverage}`
+        : `${this.config.exchange} starting…`,
+      uptime: this.startedAt > 0 ? Date.now() - this.startedAt : 0,
       universeSize: this.universe?.getSymbols().length ?? 0,
       openPositions: this.portfolio?.getOpenPositions().length ?? 0,
       dailyPnl: risk.dailyPnl,
       winRate: this.portfolio?.getWinRate() ?? 0,
-      tradingHalted: risk.tradingHalted,
+      tradingHalted: risk.tradingHalted || risk.killSwitchActive,
+      killSwitchActive: risk.killSwitchActive,
+      marginCurrency: this.config.derivatives.marginCurrency,
+      leverage: this.config.derivatives.leverage,
       lastScanAt: this.scanner?.getLastScanAt(),
+      lastScanDurationMs: this.scanner?.getLastScanDurationMs(),
+      signalCount: (this.scanner?.getFullScan() ?? []).filter(
+        (r) => r.signal?.confidence.passed,
+      ).length,
       risk,
       topRanked: this.scanner?.getLastRanked() ?? [],
+      scannedPairs: this.scanner?.getFullScan() ?? this.scanner?.getLastRanked() ?? [],
       openPositionsDetail: this.portfolio?.getOpenPositions() ?? [],
       recentTrades: this.portfolio?.getClosedTrades(20) ?? [],
-      zones: this.universe
-        ? this.universe
-            .getSymbols()
-            .flatMap((s) => this.zones.getActiveZones(s))
-            .slice(0, 50)
-        : [],
+      zones:
+        this.universe && this.zones
+          ? this.universe
+              .getSymbols()
+              .flatMap((s) => this.zones.getActiveZones(s))
+              .slice(0, 50)
+          : [],
       timeframes: [
         ...this.config.strategy.primaryTimeframes,
         ...this.config.strategy.confirmationTimeframes,
@@ -255,11 +377,83 @@ export class BotOrchestrator {
     };
   }
 
+  /**
+   * Kill switch: halt all new trades, cancel open orders, flatten positions.
+   */
+  async killSwitch(reason = 'Manual kill switch'): Promise<{
+    ok: boolean;
+    closed: number;
+    failed: number;
+    ordersCancelled: boolean;
+    message: string;
+  }> {
+    if (!this.risk || !this.portfolio) {
+      return {
+        ok: false,
+        closed: 0,
+        failed: 0,
+        ordersCancelled: false,
+        message: 'Bot not started',
+      };
+    }
+    this.risk.activateKillSwitch(reason);
+    let ordersCancelled = false;
+    if (this.exchange?.cancelAllOpenOrders) {
+      try {
+        await this.exchange.cancelAllOpenOrders();
+        ordersCancelled = true;
+      } catch (err) {
+        log.warn({ err }, 'cancelAllOpenOrders during kill switch failed');
+      }
+    }
+    const { closed, failed } = await this.portfolio.closeAllPositions(reason);
+    log.error({ reason, closed, failed, ordersCancelled }, 'Kill switch executed');
+    return {
+      ok: failed === 0,
+      closed,
+      failed,
+      ordersCancelled,
+      message: `Kill switch ON — closed ${closed} pos, ${failed} failed, orders cancelled=${ordersCancelled}`,
+    };
+  }
+
+  /** Clear kill switch and allow trading again. */
+  resumeTrading(): { ok: boolean; message: string } {
+    if (!this.risk) return { ok: false, message: 'Bot not started' };
+    this.risk.resumeKillSwitch();
+    return { ok: true, message: 'Kill switch cleared — trading resumed' };
+  }
+
+  /**
+   * Transfer free futures profits to spot wallet (CoinDCX INR/USDT-M).
+   */
+  async redeemProfits(opts?: {
+    keepBalance?: number;
+    allFree?: boolean;
+  }): Promise<{
+    ok: boolean;
+    amount: number;
+    currency: string;
+    message: string;
+  }> {
+    if (!this.portfolio) {
+      return {
+        ok: false,
+        amount: 0,
+        currency: this.config.derivatives.marginCurrency,
+        message: 'Bot not started',
+      };
+    }
+    return this.portfolio.redeemProfits(opts);
+  }
+
   async stop(): Promise<void> {
     log.info('Stopping bot…');
     this.scanner?.stop();
     this.universe?.stop();
     if (this.candleRefreshTimer) clearInterval(this.candleRefreshTimer);
+    if (this.positionSyncTimer) clearInterval(this.positionSyncTimer);
+    if (this.positionManageTimer) clearInterval(this.positionManageTimer);
     await this.marketWs?.stop();
   }
 }

@@ -29,6 +29,16 @@ export class AlertService {
     this.eventBus.on('risk:resume', () => {
       void this.broadcast('✅ Trading resumed for new session');
     });
+    this.eventBus.on('risk:kill_switch', ({ active, reason }) => {
+      void this.broadcast(
+        active
+          ? `🛑 KILL SWITCH ON\n\n${reason ?? 'Manual'}`
+          : '✅ Kill switch cleared — trading enabled',
+      );
+    });
+    this.eventBus.on('wallet:redeem', ({ amount, currency }) => {
+      void this.broadcast(`💰 Redeemed ${amount} ${currency} futures → spot wallet`);
+    });
   }
 
   formatSignal(signal: SetupSignal): string {

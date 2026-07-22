@@ -18,8 +18,12 @@ const log = getLogger('Scanner');
 export class Scanner {
   private running = false;
   private timer?: ReturnType<typeof setInterval>;
+  /** Top candidates for trade selection (best of best) */
   private lastRanked: CoinRankResult[] = [];
+  /** Full universe ranking for dashboard */
+  private lastFullScan: CoinRankResult[] = [];
   private lastScanAt = 0;
+  private lastScanDurationMs = 0;
   private readonly timeframes: Timeframe[];
 
   constructor(
@@ -41,8 +45,17 @@ export class Scanner {
     return this.lastRanked;
   }
 
+  /** Every pair from the last scan cycle, ranked best → worst */
+  getFullScan(): CoinRankResult[] {
+    return this.lastFullScan;
+  }
+
   getLastScanAt(): number {
     return this.lastScanAt;
+  }
+
+  getLastScanDurationMs(): number {
+    return this.lastScanDurationMs;
   }
 
   start(): void {
@@ -116,27 +129,33 @@ export class Scanner {
       }
     }
 
-    const ranked = this.ranking.rank(rankInputs, 10);
-    this.lastRanked = ranked;
+    // Full ranked universe (100–200) for dashboard + pick top 10 trade candidates
+    const full = this.ranking.rank(rankInputs, 0);
+    this.lastFullScan = full;
+    this.lastRanked = full.slice(0, 10);
     this.lastScanAt = Date.now();
     const durationMs = this.lastScanAt - start;
+    this.lastScanDurationMs = durationMs;
+
+    const withSignal = full.filter((r) => r.signal?.confidence.passed);
 
     log.info(
       {
         symbols: symbols.length,
+        ranked: full.length,
         durationMs,
-        top: ranked.slice(0, 3).map((r) => `${r.symbol}:${r.score}`),
-        signals: ranked.filter((r) => r.signal?.confidence.passed).length,
+        top: full.slice(0, 5).map((r) => `${r.symbol}:${r.score}`),
+        signals: withSignal.length,
       },
       'Scan complete',
     );
 
     this.eventBus.emit('scan:complete', {
-      ranked,
+      ranked: full,
       durationMs,
       timestamp: this.lastScanAt,
     });
 
-    return ranked;
+    return full;
   }
 }

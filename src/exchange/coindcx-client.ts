@@ -1,4 +1,7 @@
 import { createHmac } from 'node:crypto';
+import { request as httpsRequest } from 'node:https';
+import { request as httpRequest } from 'node:http';
+import { URL } from 'node:url';
 import type { AppConfig } from '../config/schema.js';
 import { resolveLeverage } from '../config/index.js';
 import type { Candle, MarketMeta, Ticker, Timeframe } from '../types/market.js';
@@ -57,8 +60,60 @@ export class CoinDcxClient implements IExchangeClient {
   }
 
   private sign(body: object): string {
-    const payload = Buffer.from(JSON.stringify(body)).toString();
+    // Compact JSON — CoinDCX HMAC must match exact payload bytes
+    const payload = JSON.stringify(body);
     return createHmac('sha256', this.apiSecret).update(payload).digest('hex');
+  }
+
+  /**
+   * Low-level signed HTTP. CoinDCX wallet endpoints require GET *with* a signed JSON body
+   * (fetch forbids GET bodies, so we use node:http(s)).
+   */
+  private rawSignedRequest(
+    method: 'GET' | 'POST',
+    path: string,
+    body: Record<string, unknown> = {},
+  ): Promise<{ status: number; text: string }> {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('CoinDCX API credentials not configured');
+    }
+    const timestamp = Date.now();
+    const payloadBody = { ...body, timestamp };
+    const jsonBody = JSON.stringify(payloadBody);
+    const signature = this.sign(payloadBody);
+    const url = new URL(`${this.baseUrl}${path}`);
+    const transport = url.protocol === 'http:' ? httpRequest : httpsRequest;
+
+    return new Promise((resolve, reject) => {
+      const req = transport(
+        {
+          protocol: url.protocol,
+          hostname: url.hostname,
+          port: url.port || (url.protocol === 'http:' ? 80 : 443),
+          path: `${url.pathname}${url.search}`,
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(jsonBody),
+            'X-AUTH-APIKEY': this.apiKey,
+            'X-AUTH-SIGNATURE': signature,
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+          res.on('end', () => {
+            resolve({
+              status: res.statusCode ?? 0,
+              text: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
+        },
+      );
+      req.on('error', reject);
+      req.write(jsonBody);
+      req.end();
+    });
   }
 
   private async publicGet<T>(
@@ -89,38 +144,47 @@ export class CoinDcxClient implements IExchangeClient {
     });
   }
 
-  private async signedPost<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
-    if (!this.apiKey || !this.apiSecret) {
-      throw new Error('CoinDCX API credentials not configured');
-    }
+  /** Authenticated GET (used by futures wallets — docs require GET, not POST). */
+  private async signedGet<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
     await this.limiter.acquire();
-    const timestamp = Date.now();
-    const payloadBody = { ...body, timestamp };
-    const signature = this.sign(payloadBody);
+    return withRetry(
+      async () => {
+        const { status, text } = await this.rawSignedRequest('GET', path, body);
+        if (status < 200 || status >= 300) {
+          const err = new Error(`CoinDCX GET ${path} ${status}: ${text}`) as Error & {
+            status: number;
+          };
+          err.status = status;
+          throw err;
+        }
+        return (text ? JSON.parse(text) : null) as T;
+      },
+      {
+        onRetry: (err, attempt, delay) =>
+          log.warn({ err, attempt, delay, path }, 'Retrying signed GET'),
+      },
+    );
+  }
 
-    return withRetry(async () => {
-      const res = await fetch(`${this.baseUrl}${path}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-AUTH-APIKEY': this.apiKey,
-          'X-AUTH-SIGNATURE': signature,
-        },
-        body: JSON.stringify(payloadBody),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        const err = new Error(`CoinDCX POST ${path} ${res.status}: ${text}`) as Error & {
-          status: number;
-        };
-        err.status = res.status;
-        throw err;
-      }
-      return (await res.json()) as T;
-    }, {
-      onRetry: (err, attempt, delay) =>
-        log.warn({ err, attempt, delay, path }, 'Retrying signed POST'),
-    });
+  private async signedPost<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+    await this.limiter.acquire();
+    return withRetry(
+      async () => {
+        const { status, text } = await this.rawSignedRequest('POST', path, body);
+        if (status < 200 || status >= 300) {
+          const err = new Error(`CoinDCX POST ${path} ${status}: ${text}`) as Error & {
+            status: number;
+          };
+          err.status = status;
+          throw err;
+        }
+        return (text ? JSON.parse(text) : null) as T;
+      },
+      {
+        onRetry: (err, attempt, delay) =>
+          log.warn({ err, attempt, delay, path }, 'Retrying signed POST'),
+      },
+    );
   }
 
   /** BTCUSDT → B-BTC_USDT */
@@ -144,40 +208,48 @@ export class CoinDcxClient implements IExchangeClient {
       { 'margin_currency_short_name[]': this.marginCurrency },
     );
 
-    const metas: MarketMeta[] = [];
-    // Warm instrument details with limited concurrency
     const pairs = instruments ?? [];
-    const concurrency = 8;
-    let i = 0;
-    const run = async () => {
-      while (i < pairs.length) {
-        const pair = pairs[i++]!;
-        try {
-          const detail = await this.fetchInstrumentByPair(pair);
-          if (detail) {
-            this.instrumentCache.set(detail.symbol, detail);
-            this.pairBySymbol.set(detail.symbol, detail.pair);
-            metas.push(detail);
+    // Fast path: thin metas for ALL pairs (no N× detail HTTP — that froze the dashboard for minutes).
+    // Full instrument detail is fetched on-demand via getInstrument() before orders.
+    const metas: MarketMeta[] = [];
+    for (const pair of pairs) {
+      const symbol = this.fromPair(pair);
+      this.pairBySymbol.set(symbol, pair);
+      const thin = {
+        symbol,
+        pair,
+        baseAsset: symbol.replace(/USDT$|INR$/i, ''),
+        quoteAsset: this.marginCurrency === 'INR' ? 'USDT' : this.marginCurrency,
+        status: 'active' as const,
+        minQuantity: 0.001,
+        maxQuantity: 1e9,
+        stepSize: 0.001,
+        tickSize: 0.01,
+        minNotional: 6,
+        maxLeverageLong: this.appConfig.derivatives.leverage,
+        maxLeverageShort: this.appConfig.derivatives.leverage,
+        quantityIncrement: 0.001,
+        priceIncrement: 0.01,
+        minTradeSize: 0.001,
+        unitContractValue: 1,
+      };
+      metas.push(thin);
+    }
+    log.info({ markets: metas.length }, 'Markets loaded (fast thin meta)');
+
+    // Warm a small set of preferred details in background (non-blocking)
+    const preferred = (this.appConfig.derivatives.preferredSymbols ?? []).slice(0, 30);
+    if (preferred.length) {
+      void (async () => {
+        for (const s of preferred) {
+          try {
+            await this.getInstrument(s);
+          } catch {
+            /* ignore */
           }
-        } catch (err) {
-          log.debug({ err, pair }, 'instrument detail failed');
-          const symbol = this.fromPair(pair);
-          this.pairBySymbol.set(symbol, pair);
-          metas.push({
-            symbol,
-            baseAsset: symbol.replace(/USDT$|INR$/i, ''),
-            quoteAsset: this.marginCurrency,
-            status: 'active',
-            minQuantity: 0.001,
-            maxQuantity: 1e9,
-            stepSize: 0.001,
-            tickSize: 0.01,
-            minNotional: 5,
-          });
         }
-      }
-    };
-    await Promise.all(Array.from({ length: concurrency }, () => run()));
+      })();
+    }
     return metas;
   }
 
@@ -226,7 +298,8 @@ export class CoinDcxClient implements IExchangeClient {
   }
 
   async getTickers(): Promise<Ticker[]> {
-    // Prefer futures current prices when available; fall back to instrument LTP via candles
+    // Futures current_prices is often 404 on CoinDCX — use public /exchange/ticker (USDT markets)
+    // for fast volume ranking. Never fall back to per-pair candles (would hang on 400+ pairs).
     try {
       const data = await this.publicGet<
         Record<string, { last_price?: string | number; volume?: string | number; high?: number; low?: number; bid?: number; ask?: number }>
@@ -234,38 +307,60 @@ export class CoinDcxClient implements IExchangeClient {
       >(this.baseUrl, '/exchange/v1/derivatives/futures/data/current_prices', {
         margin_currency_short_name: this.marginCurrency,
       } as never);
-      // endpoint shape may vary
-      if (Array.isArray(data)) {
+      if (Array.isArray(data) && data.length > 0) {
         return data.map((t) => this.mapTicker(t));
       }
-      return Object.entries(data).map(([pair, t]) =>
-        this.mapTicker({ pair, ...(t as object) }),
-      );
-    } catch {
-      // Fallback: build thin tickers from known pairs
-      const out: Ticker[] = [];
-      for (const [symbol, pair] of this.pairBySymbol) {
-        try {
-          const candles = await this.getCandles(symbol, '1m', 2);
-          const last = candles[candles.length - 1];
-          if (!last) continue;
-          out.push({
-            symbol,
-            lastPrice: last.close,
-            bid: last.close,
-            ask: last.close,
-            volume24h: last.volume,
-            quoteVolume24h: last.quoteVolume,
-            high24h: last.high,
-            low24h: last.low,
-            change24hPct: 0,
-            timestamp: Date.now(),
-          });
-        } catch {
-          log.debug({ pair }, 'ticker fallback failed');
+      if (data && typeof data === 'object' && !Array.isArray(data)) {
+        const entries = Object.entries(data as Record<string, object>);
+        if (entries.length > 0 && !('status' in (data as object))) {
+          return entries.map(([pair, t]) => this.mapTicker({ pair, ...t }));
         }
       }
+    } catch (err) {
+      log.debug({ err }, 'futures current_prices unavailable');
+    }
+
+    try {
+      const spot = await this.publicGet<
+        Array<{
+          market?: string;
+          last_price?: string | number;
+          volume?: string | number;
+          high?: string | number;
+          low?: string | number;
+          bid?: string | number;
+          ask?: string | number;
+          change_24_hour?: string | number;
+          timestamp?: number;
+        }>
+      >(this.baseUrl, '/exchange/ticker');
+      const rows = Array.isArray(spot) ? spot : [];
+      const out: Ticker[] = [];
+      for (const t of rows) {
+        const market = String(t.market ?? '').toUpperCase();
+        if (!market.endsWith('USDT')) continue;
+        // Skip INR quoted
+        if (market.endsWith('INR') || market.includes('INR')) continue;
+        const last = Number(t.last_price ?? 0);
+        const vol = Number(t.volume ?? 0);
+        out.push({
+          symbol: market,
+          lastPrice: last,
+          bid: Number(t.bid ?? last),
+          ask: Number(t.ask ?? last),
+          volume24h: vol,
+          quoteVolume24h: vol * last,
+          high24h: Number(t.high ?? last),
+          low24h: Number(t.low ?? last),
+          change24hPct: Number(t.change_24_hour ?? 0),
+          timestamp: Number(t.timestamp ?? Date.now()) * (Number(t.timestamp) < 1e12 ? 1000 : 1),
+        });
+      }
+      log.info({ tickers: out.length }, 'Tickers from public /exchange/ticker');
       return out;
+    } catch (err) {
+      log.warn({ err }, 'Ticker fetch failed — empty list');
+      return [];
     }
   }
 
@@ -404,23 +499,76 @@ export class CoinDcxClient implements IExchangeClient {
     return out;
   }
 
+  private usdtInrCache?: { rate: number; at: number };
+
+  /**
+   * Live USDTINR for converting contract notionals (USDT) → margin (INR).
+   */
+  async getUsdtInrRate(): Promise<number> {
+    const override = this.appConfig.derivatives.usdtInrRate;
+    if (override && override > 0) return override;
+    const now = Date.now();
+    if (this.usdtInrCache && now - this.usdtInrCache.at < 60_000) {
+      return this.usdtInrCache.rate;
+    }
+    try {
+      const tickers = await this.publicGet<
+        Array<{ market?: string; last_price?: string | number }>
+      >(this.baseUrl, '/exchange/ticker');
+      const row = (Array.isArray(tickers) ? tickers : []).find(
+        (t) => String(t.market).toUpperCase() === 'USDTINR',
+      );
+      const rate = Number(row?.last_price ?? 0);
+      if (rate > 0) {
+        this.usdtInrCache = { rate, at: now };
+        return rate;
+      }
+    } catch (err) {
+      log.warn({ err }, 'USDTINR ticker fetch failed');
+    }
+    return this.usdtInrCache?.rate ?? 99;
+  }
+
+  /**
+   * Futures wallet balances (USDT + INR).
+   * Docs: GET /exchange/v1/derivatives/futures/wallets (signed body with timestamp).
+   * Note: `balance` in the payload is free/available; locked_* are in-margin.
+   */
   async getBalances(): Promise<Balance[]> {
-    const data = await this.signedPost<
+    const data = await this.signedGet<
       Array<{
         currency_short_name?: string;
         balance?: string | number;
         locked_balance?: string | number;
+        cross_order_margin?: string | number;
+        cross_user_margin?: string | number;
+        /** Some responses expose equity / wallet balance under alternate keys */
+        equity?: string | number;
+        wallet_balance?: string | number;
+        available_balance?: string | number;
       }>
     >('/exchange/v1/derivatives/futures/wallets', {});
 
-    return (Array.isArray(data) ? data : []).map((b) => {
-      const available = Number(b.balance ?? 0);
-      const locked = Number(b.locked_balance ?? 0);
+    const rows = Array.isArray(data) ? data : [];
+    return rows.map((b) => {
+      const lockedIso = Number(b.locked_balance ?? 0);
+      const lockedCross =
+        Number(b.cross_order_margin ?? 0) + Number(b.cross_user_margin ?? 0);
+      const locked = lockedIso + lockedCross;
+
+      // Prefer explicit available/equity fields when present
+      const free = Number(
+        b.available_balance ?? b.balance ?? b.wallet_balance ?? b.equity ?? 0,
+      );
+      // Free balance already excludes locked margin on CoinDCX; total ≈ free + locked
+      const totalRaw = Number(b.equity ?? b.wallet_balance ?? 0);
+      const total = totalRaw > 0 ? totalRaw : free + locked;
+
       return {
         currency: String(b.currency_short_name ?? '').toUpperCase(),
-        available,
+        available: free,
         locked,
-        total: available + locked,
+        total: total > 0 ? total : free,
       };
     });
   }
@@ -450,6 +598,27 @@ export class CoinDcxClient implements IExchangeClient {
     });
   }
 
+  private tickDecimals(tick: number): number {
+    if (!(tick > 0) || !Number.isFinite(tick)) return 8;
+    // Prefer decimal string over scientific notation (e.g. 1e-5 → still 5 places)
+    const s = tick >= 1e-12 && tick < 1 ? tick.toFixed(12).replace(/0+$/, '') : String(tick);
+    const dot = s.indexOf('.');
+    if (dot < 0) return 0;
+    return Math.min(s.length - dot - 1, 12);
+  }
+
+  private roundToTick(price: number, tick: number): number {
+    if (!(tick > 0) || !Number.isFinite(price)) return price;
+    const rounded = Math.round(price / tick) * tick;
+    return Number(rounded.toFixed(this.tickDecimals(tick)));
+  }
+
+  /** Tick-aligned price as a plain decimal string (API rejects non-divisible floats). */
+  private formatPriceForApi(price: number, tick: number): string {
+    const rounded = this.roundToTick(price, tick);
+    return rounded.toFixed(this.tickDecimals(tick));
+  }
+
   async placeOrder(request: OrderRequest): Promise<Order> {
     const pair = this.toPair(request.symbol);
     const leverage = await this.resolveOrderLeverage(
@@ -464,6 +633,24 @@ export class CoinDcxClient implements IExchangeClient {
       log.warn({ err, symbol: request.symbol, leverage }, 'update_leverage failed (continuing)');
     }
 
+    let qty = request.quantity;
+    let tick = 0.0001;
+    try {
+      const inst = await this.getInstrument(request.symbol);
+      if (inst) {
+        const step = inst.stepSize || inst.quantityIncrement || 0.001;
+        tick = inst.priceIncrement || inst.tickSize || tick;
+        if (step > 0) {
+          qty = Math.floor(qty / step) * step;
+          const precision = Math.max(0, (String(step).split('.')[1] ?? '').length);
+          qty = Number(qty.toFixed(precision));
+        }
+      }
+    } catch {
+      /* use raw qty */
+    }
+    if (!(qty > 0)) throw new Error(`Quantity rounded to 0 for ${request.symbol}`);
+
     const orderType =
       request.type === 'market'
         ? 'market_order'
@@ -475,7 +662,7 @@ export class CoinDcxClient implements IExchangeClient {
       side: request.side,
       pair,
       order_type: orderType,
-      total_quantity: request.quantity,
+      total_quantity: qty,
       leverage,
       notification: 'no_notification',
       hidden: false,
@@ -484,23 +671,67 @@ export class CoinDcxClient implements IExchangeClient {
     };
 
     if (request.type === 'limit' && request.price !== undefined) {
-      orderBody.price = request.price;
+      orderBody.price = this.roundToTick(request.price, tick);
       orderBody.time_in_force = 'good_till_cancel';
     }
-    // Do not send time_in_force for market orders (per CoinDCX docs)
 
-    if (this.appConfig.derivatives.attachSlTpOnEntry) {
-      if (request.stopLossPrice !== undefined) orderBody.stop_loss_price = request.stopLossPrice;
-      if (request.takeProfitPrice !== undefined)
-        orderBody.take_profit_price = request.takeProfitPrice;
+    // Optional exchange SL/TP — must be tick-rounded and on the correct side of entry.
+    // CoinDCX often 422s bad TP/SL; we retry without them and manage exits in software.
+    const attachSlTp =
+      this.appConfig.derivatives.attachSlTpOnEntry && !request.reduceOnly;
+    if (attachSlTp) {
+      const ref =
+        request.price && request.price > 0
+          ? request.price
+          : request.stopLossPrice && request.takeProfitPrice
+            ? (request.stopLossPrice + request.takeProfitPrice) / 2
+            : undefined;
+      if (request.stopLossPrice !== undefined) {
+        const sl = this.roundToTick(request.stopLossPrice, tick);
+        // For market entry, exchange validates vs mark; keep raw rounded value
+        orderBody.stop_loss_price = sl;
+      }
+      if (request.takeProfitPrice !== undefined) {
+        orderBody.take_profit_price = this.roundToTick(request.takeProfitPrice, tick);
+      }
+      void ref;
     }
 
-    const data = await this.signedPost<
-      Array<Record<string, unknown>> | { orders?: Array<Record<string, unknown>> }
-    >('/exchange/v1/derivatives/futures/orders/create', { order: orderBody });
+    const create = async (body: Record<string, unknown>) => {
+      const data = await this.signedPost<
+        Array<Record<string, unknown>> | { orders?: Array<Record<string, unknown>> }
+      >('/exchange/v1/derivatives/futures/orders/create', { order: body });
+      const raw = Array.isArray(data)
+        ? data[0]
+        : data.orders?.[0] ?? (data as Record<string, unknown>);
+      return this.mapOrder(raw as Record<string, unknown>, { ...request, quantity: qty }, leverage);
+    };
 
-    const raw = Array.isArray(data) ? data[0] : data.orders?.[0] ?? (data as Record<string, unknown>);
-    return this.mapOrder(raw as Record<string, unknown>, request, leverage);
+    try {
+      return await create(orderBody);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTpSl =
+        /TP\s*\/\s*SL|take_profit|stop_loss|correct values for TP/i.test(msg) ||
+        (msg.includes('422') && /TP|SL|stop|profit/i.test(msg));
+      if (
+        isTpSl &&
+        (orderBody.stop_loss_price !== undefined || orderBody.take_profit_price !== undefined)
+      ) {
+        log.warn(
+          {
+            symbol: request.symbol,
+            sl: orderBody.stop_loss_price,
+            tp: orderBody.take_profit_price,
+          },
+          'Exchange rejected SL/TP — retrying entry without attach (software manages exits)',
+        );
+        delete orderBody.stop_loss_price;
+        delete orderBody.take_profit_price;
+        return await create(orderBody);
+      }
+      throw err;
+    }
   }
 
   async cancelOrder(orderId: string, _symbol?: string): Promise<Order> {
@@ -577,23 +808,38 @@ export class CoinDcxClient implements IExchangeClient {
     const rows = Array.isArray(data) ? data : [];
     return rows
       .map((p) => {
-        const size = Number(p.active_pos ?? 0);
+        const sizeRaw = Number(p.active_pos ?? 0);
+        const size = Math.abs(sizeRaw);
         const side: FuturesPosition['side'] =
-          size > 0 ? 'buy' : size < 0 ? 'sell' : 'flat';
+          sizeRaw > 0 ? 'buy' : sizeRaw < 0 ? 'sell' : 'flat';
+        const entry = Number(p.avg_price ?? 0);
+        const mark = Number(p.mark_price ?? 0);
+        const dir = side === 'buy' ? 1 : side === 'sell' ? -1 : 0;
+        const locked = Number(
+          p.locked_user_margin ?? p.locked_margin ?? p.ideal_margin ?? 0,
+        );
         return {
           id: String(p.id ?? ''),
           symbol: this.fromPair(String(p.pair ?? '')),
           pair: String(p.pair ?? ''),
           side,
-          size: Math.abs(size),
-          entryPrice: Number(p.avg_price ?? 0),
-          markPrice: Number(p.mark_price ?? 0),
+          size,
+          entryPrice: entry,
+          markPrice: mark,
           liquidationPrice: Number(p.liquidation_price ?? 0),
           leverage: Number(p.leverage ?? this.appConfig.derivatives.leverage),
           marginType: String(p.margin_type ?? 'isolated') === 'crossed' ? 'crossed' : 'isolated',
-          lockedMargin: Number(p.locked_margin ?? p.locked_user_margin ?? 0),
-          takeProfit: p.take_profit_trigger != null ? Number(p.take_profit_trigger) : null,
-          stopLoss: p.stop_loss_trigger != null ? Number(p.stop_loss_trigger) : null,
+          lockedMargin: locked,
+          unrealizedPnl:
+            entry > 0 && mark > 0 && size > 0 ? (mark - entry) * size * dir : undefined,
+          takeProfit:
+            p.take_profit_trigger != null && Number(p.take_profit_trigger) > 0
+              ? Number(p.take_profit_trigger)
+              : null,
+          stopLoss:
+            p.stop_loss_trigger != null && Number(p.stop_loss_trigger) > 0
+              ? Number(p.stop_loss_trigger)
+              : null,
         } satisfies FuturesPosition;
       })
       .filter((p) => p.size > 0);
@@ -603,6 +849,138 @@ export class CoinDcxClient implements IExchangeClient {
     await this.signedPost('/exchange/v1/derivatives/futures/positions/exit', {
       id: positionId,
     });
+  }
+
+  /**
+   * Attach exchange-native TP/SL to an open position (survives bot restarts).
+   * Uses market trigger orders so fills are reliable on small accounts.
+   * Prices are rounded to the instrument price_increment (tick).
+   */
+  async createPositionTpsl(
+    positionId: string,
+    opts: { stopLoss?: number; takeProfit?: number; symbol?: string },
+  ): Promise<void> {
+    if (!positionId) throw new Error('createPositionTpsl requires position id');
+    if (opts.stopLoss === undefined && opts.takeProfit === undefined) {
+      throw new Error('createPositionTpsl needs stopLoss and/or takeProfit');
+    }
+
+    // Resolve tick so stop_price is divisible by price_increment (CoinDCX 422 otherwise).
+    let tick = 0.00001;
+    if (opts.symbol) {
+      try {
+        const inst = await this.getInstrument(opts.symbol);
+        if (inst) {
+          tick = inst.priceIncrement || inst.tickSize || tick;
+        }
+      } catch (err) {
+        log.warn(
+          { err, symbol: opts.symbol },
+          'createPositionTpsl: instrument lookup failed — using default tick',
+        );
+      }
+    } else {
+      log.warn({ positionId }, 'createPositionTpsl without symbol — using default tick 0.00001');
+    }
+
+    const body: Record<string, unknown> = { id: positionId };
+    let slStr: string | undefined;
+    let tpStr: string | undefined;
+    if (opts.takeProfit !== undefined && opts.takeProfit > 0) {
+      tpStr = this.formatPriceForApi(opts.takeProfit, tick);
+      body.take_profit = {
+        stop_price: tpStr,
+        order_type: 'take_profit_market',
+      };
+    }
+    if (opts.stopLoss !== undefined && opts.stopLoss > 0) {
+      slStr = this.formatPriceForApi(opts.stopLoss, tick);
+      body.stop_loss = {
+        stop_price: slStr,
+        order_type: 'stop_market',
+      };
+    }
+
+    try {
+      await this.signedPost(
+        '/exchange/v1/derivatives/futures/positions/create_tpsl',
+        body,
+      );
+      log.info(
+        { positionId, symbol: opts.symbol, sl: slStr, tp: tpStr, tick },
+        'Exchange TP/SL attached',
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Already exists is OK
+      if (/already exists|TP already|SL already/i.test(msg)) {
+        log.info({ positionId }, 'Exchange TP/SL already present');
+        return;
+      }
+      throw err;
+    }
+  }
+
+  /** Cancel all open futures orders (all pairs for this margin currency). */
+  async cancelAllOpenOrders(): Promise<void> {
+    try {
+      // Docs: POST /exchange/v1/derivatives/futures/positions/cancel_all_open_orders
+      await this.signedPost(
+        '/exchange/v1/derivatives/futures/positions/cancel_all_open_orders',
+        {
+          margin_currency_short_name: this.marginCurrency,
+        },
+      );
+    } catch (err) {
+      // Fallback: cancel each open order individually
+      log.warn({ err }, 'cancel_all failed — falling back to per-order cancel');
+      const open = await this.getOpenOrders();
+      for (const o of open) {
+        try {
+          await this.cancelOrder(o.id, o.symbol);
+        } catch (e) {
+          log.warn({ err: e, id: o.id }, 'cancel order failed');
+        }
+      }
+    }
+  }
+
+  /**
+   * Transfer between spot and derivatives futures wallet.
+   * withdraw = futures → spot (bank / redeem profits)
+   * deposit  = spot → futures
+   * Docs: POST /exchange/v1/derivatives/futures/wallets/transfer
+   */
+  async transferFuturesWallet(
+    transferType: 'deposit' | 'withdraw',
+    amount: number,
+    currency?: string,
+  ): Promise<import('./types.js').WalletTransferResult> {
+    const cur = (currency ?? this.marginCurrency).toUpperCase();
+    if (!(amount > 0) || !Number.isFinite(amount)) {
+      throw new Error(`Invalid transfer amount: ${amount}`);
+    }
+    // CoinDCX accepts float amounts; keep reasonable precision for INR/USDT
+    const rounded =
+      cur === 'INR' ? Math.floor(amount * 100) / 100 : Math.floor(amount * 1e6) / 1e6;
+    if (rounded <= 0) throw new Error('Transfer amount rounds to zero');
+
+    const data = await this.signedPost<unknown>(
+      '/exchange/v1/derivatives/futures/wallets/transfer',
+      {
+        transfer_type: transferType,
+        amount: rounded,
+        currency_short_name: cur,
+      },
+    );
+    log.info({ transferType, amount: rounded, currency: cur }, 'Futures wallet transfer');
+    return {
+      ok: true,
+      currency: cur,
+      amount: rounded,
+      transferType,
+      raw: data,
+    };
   }
 
   private mapOrder(

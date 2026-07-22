@@ -160,23 +160,55 @@ export interface RiskState {
   consecutiveWins: number;
   tradingHalted: boolean;
   haltReason?: string;
+  /** Soft halt expiry (ms). Auto-resumes after ~30m; kill switch has no haltUntil */
   haltUntil?: number;
+  /** Manual kill switch — does NOT auto-clear (use resume kill switch) */
+  killSwitchActive: boolean;
+  killSwitchReason?: string;
   openTradeCount: number;
   winRate: number;
   totalTrades: number;
   maxDrawdownPct: number;
   defaultLeverage: number;
+  /** Margin currency label for UI (USDT | INR) */
+  marginCurrency: string;
+  sessionStartBalance: number;
+  /** Live capital tier (micro → scale) when auto-adapt is on */
+  capitalTier?: string;
+  capitalTierLabel?: string;
+  /** Effective max open trades after adapt */
+  adaptiveMaxOpenTrades?: number;
+  adaptiveEquityUsdt?: number;
 }
 
 export interface PositionSizeResult {
   quantity: number;
+  /** Notional in contract quote (USDT for CoinDCX *USDT pairs) */
   notional: number;
-  /** Margin locked ≈ notional / leverage */
+  /** Margin locked in wallet currency (INR or USDT) */
   margin: number;
   leverage: number;
+  /** Risk amount in wallet currency */
   riskAmount: number;
   stopDistance: number;
   stopDistancePct: number;
   allowed: boolean;
   reason?: string;
+  /** FX used for INR-margin sizing (USDT→INR); 1 for USDT margin */
+  usdtInrRate?: number;
+}
+
+export interface SizePositionOptions {
+  balance?: number;
+  leverageOverride?: number;
+  /** Live USDT→INR (required for correct INR margin) */
+  usdtInrRate?: number;
+  /** Exchange min trade size (contracts) */
+  minQuantity?: number;
+  /** Exchange quantity step */
+  stepSize?: number;
+  /** Exchange min notional in USDT */
+  minNotionalUsdt?: number;
+  /** Instrument max leverage */
+  maxLeverage?: number;
 }

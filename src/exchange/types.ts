@@ -16,6 +16,14 @@ export interface FuturesInstrumentMeta extends MarketMeta {
   unitContractValue: number;
 }
 
+export interface WalletTransferResult {
+  ok: boolean;
+  currency: string;
+  amount: number;
+  transferType: 'deposit' | 'withdraw';
+  raw?: unknown;
+}
+
 export interface IExchangeClient {
   readonly name: string;
   getMarkets(): Promise<MarketMeta[]>;
@@ -33,6 +41,27 @@ export interface IExchangeClient {
   updateLeverage?(symbol: string, leverage: number): Promise<void>;
   getInstrument?(symbol: string): Promise<FuturesInstrumentMeta | undefined>;
   toPair?(symbol: string): string;
+  /** Cancel every open futures order (kill switch) */
+  cancelAllOpenOrders?(): Promise<void>;
+  /**
+   * Move funds between spot and futures wallet.
+   * transferType withdraw = futures → spot (redeem), deposit = spot → futures.
+   */
+  transferFuturesWallet?(
+    transferType: 'deposit' | 'withdraw',
+    amount: number,
+    currency: string,
+  ): Promise<WalletTransferResult>;
+  /** USDT→INR rate for INR-margin sizing (1 when margin is USDT) */
+  getUsdtInrRate?(): Promise<number>;
+  /**
+   * Attach exchange-side take-profit / stop-loss to an open futures position.
+   * CoinDCX: POST .../positions/create_tpsl
+   */
+  createPositionTpsl?(
+    positionId: string,
+    opts: { stopLoss?: number; takeProfit?: number; symbol?: string },
+  ): Promise<void>;
 }
 
 export type { Balance, Order, OrderRequest, Candle, Ticker, MarketMeta, Timeframe, FuturesPosition };

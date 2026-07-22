@@ -19,7 +19,7 @@ The bot continuously scans **100–200 USDT-M futures pairs**, ranks them with i
 | **Liquidity** | Equal H/L, pools, stop hunts, swing failures, confirmed sweeps |
 | **Scoring** | Weighted confidence (min 85) — only trade when all gates pass |
 | **Ranking** | Top-10 candidates every scan cycle; execute highest-ranked only |
-| **Risk** | 1% risk/trade, 3 consecutive loss halt, 3% daily DD halt, ATR stops/trails |
+| **Risk** | 1% risk/trade, 3 consecutive loss / 3% daily DD → 30m soft halt, ATR stops/trails |
 | **Execution** | CoinDCX **USDT-M futures** REST with custom leverage, SL/TP on entry, partial TP1/TP2, BE + ATR trail |
 | **Leverage** | Global default + per-symbol map (`DERIV_LEVERAGE`, `DERIV_LEVERAGE_BY_SYMBOL`) |
 | **Alerts** | Telegram + Discord formatted signals |

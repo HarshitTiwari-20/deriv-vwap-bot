@@ -41,8 +41,19 @@ async function main(): Promise<void> {
     });
   });
 
-  await bot.start();
+  // API first so the dashboard loads while the bot warms markets/candles
   api.start();
+  log.info(
+    { apiPort: config.server.apiPort, wsPort: config.server.wsPort },
+    'Dashboard API online — starting bot warm-up',
+  );
+
+  try {
+    await bot.start();
+  } catch (err) {
+    log.error({ err }, 'Bot start failed — API stays up for kill/status; fix and restart');
+    // Keep process alive so dashboard remains reachable
+  }
 }
 
 main().catch((err) => {

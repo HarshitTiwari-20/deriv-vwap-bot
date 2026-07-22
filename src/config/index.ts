@@ -103,6 +103,12 @@ export function loadConfig(): AppConfig {
         | 'crossed',
       attachSlTpOnEntry: bool('DERIV_ATTACH_SL_TP', true),
       respectInstrumentMaxLeverage: bool('DERIV_RESPECT_MAX_LEVERAGE', true),
+      microAccountMode: bool('MICRO_ACCOUNT_MODE', false),
+      usdtInrRate: num('USDT_INR_RATE', 0)!,
+      preferredSymbols: (process.env.PREFERRED_SYMBOLS ?? '')
+        .split(',')
+        .map((s) => s.trim().toUpperCase().replace(/[-_/]/g, ''))
+        .filter(Boolean),
     },
     redis: {
       url: process.env.REDIS_URL ?? 'redis://localhost:6379',
@@ -124,6 +130,9 @@ export function loadConfig(): AppConfig {
         'MIN_RISK_REWARD',
         resolveExchange() === 'binance_testnet' ? 1.5 : 2,
       )!,
+      maxRiskPerTradePct: num('MAX_RISK_PER_TRADE_PCT', 0)!,
+      maxTradesPerDay: num('MAX_TRADES_PER_DAY', 0)!,
+      autoAdaptToBalance: bool('AUTO_ADAPT_TO_BALANCE', true),
     },
     scanner: {
       universeSize: num('SCAN_UNIVERSE_SIZE', resolveExchange() === 'binance_testnet' ? 80 : 150)!,
@@ -139,6 +148,8 @@ export function loadConfig(): AppConfig {
         process.env.RELAXED_ENTRY !== undefined
           ? bool('RELAXED_ENTRY', false)
           : resolveExchange() === 'binance_testnet',
+      indicatorEntry: bool('INDICATOR_ENTRY', true),
+      indicatorMinScore: num('INDICATOR_MIN_SCORE', 0.55)!,
     },
     alerts: {
       enabled: bool('ALERTS_ENABLED', true),
@@ -153,10 +164,10 @@ export function loadConfig(): AppConfig {
     },
   };
 
-  // Force exchange from env over JSON if set
+  // JSON defaults first, then env wins (so DERIV_LEVERAGE / INR margin / risk caps apply)
   const merged = deepMerge(
-    fromEnv as Record<string, unknown>,
     { ...overlay, exchange } as Record<string, unknown>,
+    fromEnv as Record<string, unknown>,
   );
 
   // Keep binance.testnet consistent with exchange choice

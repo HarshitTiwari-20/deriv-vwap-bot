@@ -57,6 +57,10 @@ export class ApiServer {
     this.eventBus.on('position:updated', ({ position }) => push('position_update', position));
     this.eventBus.on('signal:generated', ({ signal }) => push('signal', signal));
     this.eventBus.on('risk:halt', ({ state, reason }) => push('risk_halt', { state, reason }));
+    this.eventBus.on('risk:kill_switch', ({ active, reason, state }) =>
+      push('kill_switch', { active, reason, state }),
+    );
+    this.eventBus.on('wallet:redeem', (data) => push('wallet_redeem', data));
     this.eventBus.on('ticker:update', ({ ticker }) => {
       push('ticker', ticker);
     });
@@ -64,9 +68,22 @@ export class ApiServer {
     setInterval(() => push('status', this.bot.getStatus()), 5_000);
   }
 
+  private async readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+    }
+    if (chunks.length === 0) return {};
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -74,7 +91,7 @@ export class ApiServer {
       return;
     }
 
-    const url = req.url ?? '/';
+    const url = (req.url ?? '/').split('?')[0] ?? '/';
     try {
       if (url === '/health') {
         this.json(res, 200, { ok: true, ts: Date.now() });
@@ -86,6 +103,16 @@ export class ApiServer {
       }
       if (url === '/api/ranked') {
         this.json(res, 200, this.bot.getStatus().topRanked);
+        return;
+      }
+      if (url === '/api/scanned' || url === '/api/scan') {
+        this.json(res, 200, {
+          pairs: this.bot.getStatus().scannedPairs,
+          universeSize: this.bot.getStatus().universeSize,
+          lastScanAt: this.bot.getStatus().lastScanAt,
+          lastScanDurationMs: this.bot.getStatus().lastScanDurationMs,
+          signalCount: this.bot.getStatus().signalCount,
+        });
         return;
       }
       if (url === '/api/positions') {
@@ -104,10 +131,41 @@ export class ApiServer {
         this.json(res, 200, this.bot.getStatus().zones);
         return;
       }
+
+      // ── Control actions ──────────────────────────────────────────
+      if (url === '/api/kill-switch' && req.method === 'POST') {
+        const body = await this.readBody(req);
+        const reason =
+          typeof body.reason === 'string' && body.reason.trim()
+            ? body.reason.trim()
+            : 'Manual kill switch from dashboard';
+        const result = await this.bot.killSwitch(reason);
+        this.json(res, result.ok ? 200 : 207, result);
+        return;
+      }
+
+      if (url === '/api/resume' && req.method === 'POST') {
+        const result = this.bot.resumeTrading();
+        this.json(res, result.ok ? 200 : 400, result);
+        return;
+      }
+
+      if (url === '/api/redeem-profits' && req.method === 'POST') {
+        const body = await this.readBody(req);
+        const keepBalance =
+          typeof body.keepBalance === 'number' && Number.isFinite(body.keepBalance)
+            ? body.keepBalance
+            : undefined;
+        const allFree = body.allFree === true;
+        const result = await this.bot.redeemProfits({ keepBalance, allFree });
+        this.json(res, result.ok ? 200 : 400, result);
+        return;
+      }
+
       this.json(res, 404, { error: 'not found' });
     } catch (err) {
       log.error({ err }, 'API error');
-      this.json(res, 500, { error: 'internal' });
+      this.json(res, 500, { error: 'internal', message: err instanceof Error ? err.message : String(err) });
     }
   }
 

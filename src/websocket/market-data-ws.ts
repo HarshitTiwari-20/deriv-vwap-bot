@@ -337,36 +337,45 @@ export class MarketDataWs extends EventEmitter {
     }
   }
 
+  /**
+   * Warm candles for many symbols.
+   * @param onlyTimeframes — if set, only these TFs (use primary first for fast scan start)
+   */
   async warmCandles(
     symbols: string[],
     limit = 200,
+    onlyTimeframes?: Timeframe[],
   ): Promise<Map<string, Map<Timeframe, Candle[]>>> {
     const store = new Map<string, Map<Timeframe, Candle[]>>();
-    const tfs = [...this.timeframes];
-    const concurrency = 8;
+    for (const s of symbols) store.set(s, new Map());
+    const tfs = onlyTimeframes?.length ? onlyTimeframes : [...this.timeframes];
+    type Job = { sym: string; tf: Timeframe };
+    const jobs: Job[] = [];
+    for (const sym of symbols) {
+      for (const tf of tfs) jobs.push({ sym, tf });
+    }
+    const concurrency = 20;
     let i = 0;
     let done = 0;
-    const total = symbols.length;
+    const total = jobs.length;
     const run = async () => {
-      while (i < symbols.length) {
-        const idx = i++;
-        const sym = symbols[idx]!;
-        const byTf = new Map<Timeframe, Candle[]>();
-        for (const tf of tfs) {
-          try {
-            const candles = await this.fetchCandles(sym, tf, limit);
-            byTf.set(tf, candles);
-            const last = candles[candles.length - 1];
-            if (last) this.lastPrices.set(sym, last.close);
-          } catch (err) {
-            log.debug({ err, sym, tf }, 'warmCandles failed');
-            byTf.set(tf, []);
-          }
+      while (i < jobs.length) {
+        const job = jobs[i++]!;
+        try {
+          const candles = await this.fetchCandles(job.sym, job.tf, limit);
+          store.get(job.sym)?.set(job.tf, candles);
+          const last = candles[candles.length - 1];
+          if (last) this.lastPrices.set(job.sym, last.close);
+        } catch (err) {
+          log.debug({ err, sym: job.sym, tf: job.tf }, 'warmCandles failed');
+          store.get(job.sym)?.set(job.tf, []);
         }
-        store.set(sym, byTf);
         done += 1;
-        if (done % 25 === 0 || done === total) {
-          log.info({ done, total }, 'Candle warm progress');
+        if (done % 50 === 0 || done === total) {
+          log.info(
+            { done, total, symbols: symbols.length, tfs: tfs.length },
+            'Candle warm progress',
+          );
         }
       }
     };

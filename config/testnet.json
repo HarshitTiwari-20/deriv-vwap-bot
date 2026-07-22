@@ -9,23 +9,23 @@
   },
   "derivatives": {
     "marginCurrency": "USDT",
-    "leverage": 10,
+    "leverage": 25,
     "leverageBySymbol": {
-      "BTCUSDT": 20,
-      "ETHUSDT": 15
+      "BTCUSDT": 25,
+      "ETHUSDT": 20
     },
     "marginType": "isolated",
     "attachSlTpOnEntry": false,
     "respectInstrumentMaxLeverage": true
   },
   "risk": {
-    "accountBalanceUsdt": 10000,
-    "riskPerTradePct": 1,
-    "maxDailyDrawdownPct": 5,
-    "maxConsecutiveLosses": 5,
-    "maxOpenTrades": 3,
-    "maxExposurePct": 40,
-    "maxNotionalToEquity": 12,
+    "accountBalanceUsdt": 5000,
+    "riskPerTradePct": 0.5,
+    "maxDailyDrawdownPct": 2,
+    "maxConsecutiveLosses": 2,
+    "maxOpenTrades": 1,
+    "maxExposurePct": 20,
+    "maxNotionalToEquity": 5,
     "minConfidenceScore": 62,
     "minRiskReward": 1.5
   },
